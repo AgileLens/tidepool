@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<title>Tidepool — a WebGPU compute study</title>
+	<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+	<meta name="description" content="A quarter-million GPU-computed particles, a school of fish, and bioluminescence you stir with your hands. three.js WebGPURenderer + TSL, with WebXR.">
+	<meta property="og:title" content="Tidepool — a WebGPU compute study">
+	<meta property="og:description" content="262,144 particles · 1,024 fish · bioluminescence · WebXR. Zero CPU physics.">
+	<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='38' fill='%239FE7D8'/><circle cx='50' cy='50' r='18' fill='%23071619'/></svg>">
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Young+Serif&display=swap" rel="stylesheet">
+	<style>
+		:root {
+			--foam:    #F7FBF6;
+			--seafoam: #9FE7D8;
+			--sand:    #EAD9AE;
+			--shell:   #F3C6BC;
+			--biolume: #8FFDE8;
+			--ink:     #DCEDE6;
+			--ink-dim: #7FA79C;
+			--deep:    #071619;
+		}
+		* { margin: 0; padding: 0; box-sizing: border-box; }
+		html, body { height: 100%; overflow: hidden; background: var(--deep); }
+		body {
+			font-family: 'IBM Plex Mono', ui-monospace, monospace;
+			color: var(--ink);
+			-webkit-font-smoothing: antialiased;
+			user-select: none;
+		}
+		canvas { display: block; touch-action: none; }
+
+		.hud { position: fixed; z-index: 10; pointer-events: none; }
+		.hud > * { pointer-events: auto; }
+
+		#title { top: 28px; left: 32px; pointer-events: none; }
+		#title h1 {
+			font-family: 'Young Serif', serif;
+			font-weight: 400;
+			font-size: clamp(28px, 4vw, 44px);
+			letter-spacing: 0.01em;
+			color: var(--foam);
+			line-height: 1;
+		}
+		#title p {
+			margin-top: 10px;
+			font-size: 11px;
+			letter-spacing: 0.14em;
+			text-transform: uppercase;
+			color: var(--ink-dim);
+		}
+		#title p b { color: var(--seafoam); font-weight: 500; }
+
+		#readout { top: 32px; right: 32px; text-align: right; font-size: 11px; letter-spacing: 0.12em; }
+		#readout .row { margin-bottom: 7px; text-transform: uppercase; }
+		#readout .k { color: var(--ink-dim); margin-right: 10px; }
+		#readout .v { color: var(--ink); font-weight: 500; }
+		#readout #backend.gpu  { color: var(--seafoam); }
+		#readout #backend.gl   { color: var(--sand); }
+		#density {
+			background: none; border: 1px solid rgba(159,231,216,0.25); border-radius: 3px;
+			color: var(--ink-dim); font: inherit; letter-spacing: inherit; text-transform: uppercase;
+			padding: 3px 8px; margin-top: 4px; cursor: pointer; transition: color .2s, border-color .2s;
+		}
+		#density:hover { color: var(--seafoam); border-color: var(--seafoam); }
+
+		#modes { bottom: 30px; left: 32px; display: flex; gap: 4px; }
+		#modes button {
+			background: none; border: none; cursor: pointer;
+			font: inherit; font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase;
+			color: var(--ink-dim); padding: 10px 14px 12px; position: relative;
+			transition: color .25s;
+		}
+		#modes button::after {
+			content: ""; position: absolute; left: 14px; right: 14px; bottom: 4px; height: 2px;
+			background: var(--sand); border-radius: 2px;
+			transform: scaleX(0); transform-origin: left; transition: transform .35s cubic-bezier(.2,.8,.2,1);
+		}
+		#modes button:hover { color: var(--ink); }
+		#modes button.active { color: var(--foam); }
+		#modes button.active::after { transform: scaleX(1); }
+		#modes button span { color: var(--ink-dim); font-size: 10px; margin-right: 6px; }
+
+		#hints { bottom: 34px; right: 32px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-dim); text-align: right; line-height: 1.9; pointer-events: none; }
+
+		/* restyle three.js XRButton to match the instrument panel */
+		#XRButton {
+			bottom: 92px !important; left: 32px !important; transform: none !important;
+			font-family: 'IBM Plex Mono', monospace !important; font-size: 11px !important;
+			letter-spacing: 0.16em !important; text-transform: uppercase;
+			background: rgba(7,22,25,0.75) !important; color: var(--seafoam) !important;
+			border: 1px solid var(--seafoam) !important; border-radius: 3px !important;
+			opacity: 1 !important; padding: 10px 16px !important; width: auto !important;
+		}
+
+		#veil {
+			position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
+			background: var(--deep); transition: opacity 1.2s ease; font-size: 12px; letter-spacing: 0.2em;
+			text-transform: uppercase; color: var(--ink-dim); flex-direction: column; gap: 18px; text-align: center; padding: 24px;
+		}
+		#veil.done { opacity: 0; pointer-events: none; }
+		#veil .drop { width: 10px; height: 10px; border-radius: 50%; background: var(--seafoam); animation: sink 1.6s ease-in-out infinite; }
+		@keyframes sink { 0%,100% { transform: translateY(-8px); opacity:.5 } 50% { transform: translateY(8px); opacity:1 } }
+		#veil.error .drop { display: none; }
+
+		@media (max-width: 640px) {
+			#title { top: 18px; left: 18px; }
+			#readout { top: 20px; right: 18px; }
+			#modes { bottom: 18px; left: 8px; }
+			#modes button { padding: 10px 8px 12px; font-size: 11px; }
+			#modes button::after { left: 8px; right: 8px; }
+			#modes button span, #hints { display: none; }
+			#XRButton { bottom: 76px !important; left: 18px !important; }
+		}
+		@media (prefers-reduced-motion: reduce) {
+			#veil .drop { animation: none; }
+		}
+	</style>
+
+	<script type="importmap">
+	{
+		"imports": {
+			"three": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.webgpu.js",
+			"three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.webgpu.js",
+			"three/tsl": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.tsl.js",
+			"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.0/examples/jsm/"
+		}
+	}
+	</script>
+</head>
+<body>
+
+	<div class="hud" id="title">
+		<h1>Tidepool</h1>
+		<p>a WebGPU compute study · <b>three.js r185 + TSL</b> · zero CPU physics</p>
+	</div>
+
+	<div class="hud" id="readout">
+		<div class="row"><span class="k">backend</span><span class="v" id="backend">—</span></div>
+		<div class="row"><span class="k">particles</span><span class="v" id="pcount">—</span></div>
+		<div class="row"><span class="k">fish</span><span class="v" id="fcount">—</span></div>
+		<div class="row"><span class="k">fps</span><span class="v" id="fps">—</span></div>
+		<button id="density" title="Cycle particle density">density</button>
+	</div>
+
+	<div class="hud" id="modes">
+		<button data-mode="0" class="active"><span>1</span>Drift</button>
+		<button data-mode="1"><span>2</span>Kelp</button>
+		<button data-mode="2"><span>3</span>School</button>
+		<button data-mode="3"><span>4</span>Pulse</button>
+	</div>
+
+	<div class="hud" id="hints">
+		move stirs a bioluminescent wake · click bursts · fish flee<br>
+		drag orbits · space pauses · in xr: right pinch = mode, left = brightness
+	</div>
+
+	<div id="veil"><div class="drop"></div><div id="veil-msg">filling the pool</div></div>
+
+	<script type="module">
+
+		import * as THREE from 'three/webgpu';
+		import {
+			Fn, If, uniform, float, uv, vec2, vec3, vec4, color, mix, varying,
+			instancedArray, instanceIndex, hash,
+			sin, cos, fract, floor, sqrt, exp, abs, clamp, smoothstep, cross, normalize,
+			mat3, negate, positionLocal, cameraPosition,
+			mx_noise_float, mx_noise_vec3, screenUV, TWO_PI, pass
+		} from 'three/tsl';
+		import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+		import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+		import { XRButton } from 'three/addons/webxr/XRButton.js';
+		import { setupWebGLXRFallback } from 'three/addons/webxr/WebGLXRFallback.js';
+
+		// ---------------------------------------------------------------- setup
+
+		const isMobile = /Mobi|Android|iPhone|iPad/i.test( navigator.userAgent );
+		const reducedMotion = window.matchMedia( '(prefers-reduced-motion: reduce)' ).matches;
+
+		const qp = new URLSearchParams( location.search );
+		const DENSITIES = [ 65536, 262144, 524288 ];
+		const urlN = parseInt( qp.get( 'n' ) || '0' );
+		const particleCount = DENSITIES.includes( urlN ) ? urlN : ( isMobile ? DENSITIES[ 0 ] : DENSITIES[ 1 ] );
+		const FISH = 1024;
+
+		// pool dimensions (world units; 1 unit = XRSCALE meters while presenting)
+		const R = 26;
+		const H = 16;
+
+		// XR tunables — lessons from the Unbuilt Theater calibration passes
+		const XRSCALE = Math.min( 0.4, parseFloat( qp.get( 'xrscale' ) ) || 0.09 );
+		const XRBOOST = Math.min( 4, parseFloat( qp.get( 'xrboost' ) ) || 1.5 );
+		const BRIGHT = [ 0.5, 0.75, 1, 1.5, 2.25 ]; // left pinch cycles these live in-headset
+		let brightIdx = 2;
+
+		const veil = document.getElementById( 'veil' );
+		const veilMsg = document.getElementById( 'veil-msg' );
+
+		let camera, scene, renderer, controls, pipeline;
+		let computeInit, computeUpdate, computeBurst, fishInit, fishUpdate;
+		let paused = false;
+		let currentMode = 0;
+
+		// ------------------------------------------------------------- uniforms
+
+		const uDelta = uniform( 0.016 );
+		const uTime = uniform( 0 );
+
+		const uDrift  = uniform( 1 );
+		const uKelp   = uniform( 0 );
+		const uSchool = uniform( 0 );
+		const uPulse  = uniform( 0 );
+		const weights = [ uDrift, uKelp, uSchool, uPulse ];
+		let modeTargets = [ 1, 0, 0, 0 ];
+
+		const uAttractor = uniform( new THREE.Vector3( 0, H * 0.5, 0 ) );
+		const uSwirlAxis = uniform( new THREE.Vector3( 0, 1, 0 ) );
+
+		const uPointer = uniform( new THREE.Vector3( 0, - 100, 0 ) );
+		const uPointerVel = uniform( new THREE.Vector3() );
+		const uPointerAmt = uniform( 0 );
+
+		const uSize = uniform( isMobile ? 0.30 : 0.22 );
+		const uWorldScale = uniform( 1 );   // 1 on desktop, XRSCALE while presenting
+		const uBoost = uniform( 1 );        // brightness compensation (no bloom in XR)
+
+		init().catch( ( e ) => {
+
+			console.error( e );
+			veil.classList.add( 'error' );
+			veilMsg.innerHTML = 'this pool needs a GPU —<br>WebGPU or WebGL2 could not start in this browser.';
+
+		} );
+
+		async function init() {
+
+			camera = new THREE.PerspectiveCamera( 55, innerWidth / innerHeight, 0.05, 500 );
+			camera.position.set( 0, 15, 42 );
+
+			scene = new THREE.Scene();
+
+			const bgNode = mix( color( 0x04100f ), color( 0x0f2b2c ), screenUV.y.pow( 1.4 ) );
+			scene.backgroundNode = bgNode;
+
+			// ------------------------------------------------------ GPU buffers
+
+			const positions = instancedArray( particleCount, 'vec3' );
+			const velocities = instancedArray( particleCount, 'vec3' );
+			const excite = instancedArray( particleCount, 'float' );
+
+			const fishPos = instancedArray( FISH, 'vec3' );
+			const fishVel = instancedArray( FISH, 'vec3' );
+
+			// -------------------------------------------------- helper: curl(ψ)
+
+			const FREQ = 0.085, EPS = 0.6, MORPH = 0.05;
+			const curlNoise = ( p ) => {
+
+				const q = p.mul( FREQ ).add( vec3( 0, uTime.mul( MORPH ), 0 ) ).toVar();
+				const e = float( EPS * FREQ );
+
+				const dx = vec3( e, 0, 0 ), dy = vec3( 0, e, 0 ), dz = vec3( 0, 0, e );
+
+				const px1 = mx_noise_vec3( q.add( dx ) ).toVar(), px0 = mx_noise_vec3( q.sub( dx ) ).toVar();
+				const py1 = mx_noise_vec3( q.add( dy ) ).toVar(), py0 = mx_noise_vec3( q.sub( dy ) ).toVar();
+				const pz1 = mx_noise_vec3( q.add( dz ) ).toVar(), pz0 = mx_noise_vec3( q.sub( dz ) ).toVar();
+
+				return vec3(
+					py1.z.sub( py0.z ).sub( pz1.y.sub( pz0.y ) ),
+					pz1.x.sub( pz0.x ).sub( px1.z.sub( px0.z ) ),
+					px1.y.sub( px0.y ).sub( py1.x.sub( py0.x ) )
+				).div( e.mul( 2 ) ).toVar();
+
+			};
+
+			const rand = ( x ) => fract( sin( x ).mul( 43758.5453 ) );
+
+			// ------------------------------------------------- particle computes
+
+			computeInit = Fn( () => {
+
+				const position = positions.element( instanceIndex );
+				const velocity = velocities.element( instanceIndex );
+
+				const a = hash( instanceIndex ).mul( TWO_PI );
+				const r = sqrt( hash( instanceIndex.add( 1 ) ) ).mul( R * 0.9 );
+
+				position.x = cos( a ).mul( r );
+				position.z = sin( a ).mul( r );
+				position.y = hash( instanceIndex.add( 2 ) ).mul( H );
+
+				velocity.assign( vec3( 0 ) );
+				excite.element( instanceIndex ).assign( 0 );
+
+			} )().compute( particleCount ).setName( 'Fill Pool' );
+
+			computeUpdate = Fn( () => {
+
+				const p = positions.element( instanceIndex );
+				const v = velocities.element( instanceIndex );
+				const e = excite.element( instanceIndex );
+
+				const force = vec3( 0 ).toVar();
+
+				// shared current
+				const curl = curlNoise( p );
+				const curlAmp = uDrift.mul( 2.2 )
+					.add( uKelp.mul( 0.7 ) )
+					.add( uSchool.mul( 1.0 ) )
+					.add( uPulse.mul( 0.9 ) );
+				force.addAssign( curl.mul( curlAmp ) );
+
+				// drift: marine snow settles, faintly
+				force.addAssign( vec3( 0, uDrift.mul( - 0.35 ), 0 ) );
+
+				// kelp: spring to swaying strands
+				{
+
+					const NS = 26;
+					const si = floor( hash( instanceIndex.add( 17 ) ).mul( NS ) ).toVar();
+					const sa = rand( si.mul( 127.1 ) ).mul( TWO_PI );
+					const sr = sqrt( rand( si.mul( 311.7 ).add( 3.7 ) ) ).mul( R * 0.72 );
+					const yPref = hash( instanceIndex.add( 23 ) ).mul( H * 0.94 ).add( 0.4 );
+
+					const phase = uTime.mul( 0.7 ).add( si.mul( 1.7 ) ).add( p.y.mul( 0.24 ) );
+					const swayAmp = p.y.div( H ).mul( 2.6 );
+					const target = vec3(
+						cos( sa ).mul( sr ).add( sin( phase ).mul( swayAmp ) ),
+						yPref,
+						sin( sa ).mul( sr ).add( cos( phase.mul( 0.83 ) ).mul( swayAmp ) )
+					);
+
+					force.addAssign( target.sub( p ).mul( 1.1 ).mul( uKelp ) );
+
+				}
+
+				// school: swirl around the wandering attractor
+				{
+
+					const toC = uAttractor.sub( p ).toVar();
+					const d = toC.length().max( 0.001 ).toVar();
+					const tangent = normalize( cross( uSwirlAxis, toC ) );
+					const cohesion = toC.div( d ).mul( clamp( d.sub( 4.5 ), - 2.5, 3.0 ) ).mul( 1.1 );
+					force.addAssign( tangent.mul( 3.2 ).add( cohesion ).mul( uSchool ) );
+
+				}
+
+				// pulse: jelly-bell pressure waves
+				{
+
+					const rv = p.sub( uAttractor ).toVar();
+					const d = rv.length().max( 0.001 ).toVar();
+					const wave = sin( d.mul( 1.05 ).sub( uTime.mul( 3.1 ) ) );
+					force.addAssign( rv.div( d ).mul( wave ).mul( exp( d.mul( - 0.055 ) ) ).mul( 5.2 ).mul( uPulse ) );
+
+				}
+
+				// pointer current + bioluminescent excitation
+				const fall = float( 0 ).toVar();
+				{
+
+					const dp = p.sub( uPointer ).toVar();
+					fall.assign( exp( dp.dot( dp ).mul( - 0.030 ) ) );
+					force.addAssign( uPointerVel.mul( 9.0 ).add( normalize( dp ).mul( 2.0 ) ).mul( fall ).mul( uPointerAmt ) );
+
+				}
+
+				// soft containment
+				{
+
+					const rxz = p.xz.length().max( 0.001 ).toVar();
+					const away = vec3( p.x, 0, p.z ).div( rxz ).toVar();
+					If( rxz.greaterThan( R ), () => {
+
+						force.subAssign( away.mul( rxz.sub( R ) ).mul( 4.0 ) );
+
+					} );
+					If( p.y.lessThan( 0.4 ), () => {
+
+						force.addAssign( vec3( 0, float( 0.4 ).sub( p.y ).mul( 6.0 ), 0 ) );
+
+					} );
+					If( p.y.greaterThan( H ), () => {
+
+						force.subAssign( vec3( 0, p.y.sub( H ).mul( 6.0 ), 0 ) );
+
+					} );
+
+				}
+
+				// integrate
+				v.addAssign( force.mul( uDelta ) );
+				v.mulAssign( exp( uDelta.mul( - 1.35 ) ) );
+
+				const sp = v.length().toVar();
+				If( sp.greaterThan( 6.0 ), () => {
+
+					v.assign( v.div( sp ).mul( 6.0 ) );
+
+				} );
+
+				p.addAssign( v.mul( uDelta ).mul( 2.2 ) );
+
+				// bioluminescence: excite on stir + turbulence, decay to dark
+				e.mulAssign( exp( uDelta.mul( - 1.6 ) ) );
+				e.addAssign( fall.mul( uPointerAmt ).mul( uDelta ).mul( 10.0 ) );
+				e.addAssign( smoothstep( 2.6, 5.6, sp ).mul( uDelta ).mul( 2.2 ) );
+				e.assign( e.min( 1.0 ) );
+
+			} )().compute( particleCount ).setName( 'Tide Update' );
+
+			computeBurst = Fn( () => {
+
+				const p = positions.element( instanceIndex );
+				const v = velocities.element( instanceIndex );
+				const e = excite.element( instanceIndex );
+
+				const dp = p.sub( uPointer ).toVar();
+				const d = dp.length().max( 0.001 );
+				const amp = float( 7.0 ).sub( d ).max( 0.0 ).mul( hash( instanceIndex.add( 5 ) ).mul( 0.7 ).add( 0.5 ) );
+
+				v.addAssign( dp.div( d ).mul( amp ).mul( 0.9 ) );
+				e.assign( e.add( amp.mul( 0.16 ) ).min( 1.0 ) );
+
+			} )().compute( particleCount ).setName( 'Burst' );
+
+			// ----------------------------------------------------- fish computes
+
+			fishInit = Fn( () => {
+
+				const p = fishPos.element( instanceIndex );
+				const v = fishVel.element( instanceIndex );
+
+				const a = hash( instanceIndex ).mul( TWO_PI );
+				const r = sqrt( hash( instanceIndex.add( 1 ) ) ).mul( R * 0.5 ).add( 2.0 );
+
+				p.x = cos( a ).mul( r );
+				p.z = sin( a ).mul( r );
+				p.y = hash( instanceIndex.add( 2 ) ).mul( H - 4.0 ).add( 2.0 );
+
+				// start on the tangent so the school reads immediately
+				v.assign( vec3( sin( a ).negate(), 0, cos( a ) ).mul( 2.0 ) );
+
+			} )().compute( FISH ).setName( 'Hatch Fish' );
+
+			fishUpdate = Fn( () => {
+
+				const p = fishPos.element( instanceIndex );
+				const v = fishVel.element( instanceIndex );
+
+				const force = vec3( 0 ).toVar();
+
+				// currents move fish too, gently
+				force.addAssign( curlNoise( p ).mul( 1.1 ) );
+
+				// cruise around the attractor; School mode tightens the ball
+				{
+
+					const toC = uAttractor.sub( p ).toVar();
+					const d = toC.length().max( 0.001 ).toVar();
+					const tangent = normalize( cross( uSwirlAxis, toC ) );
+					const ring = float( 7.0 ).sub( uSchool.mul( 3.0 ) );
+					const cohesion = toC.div( d ).mul( clamp( d.sub( ring ), - 2.0, 3.0 ) );
+					force.addAssign( tangent.mul( uSchool.mul( 2.6 ).add( 1.4 ) ) );
+					force.addAssign( cohesion.mul( uSchool.mul( 0.9 ).add( 0.5 ) ) );
+
+				}
+
+				// per-fish wander so the school breathes
+				{
+
+					const h = hash( instanceIndex.add( 11 ) );
+					const wt = uTime.mul( 0.6 ).add( h.mul( TWO_PI ) );
+					force.addAssign( vec3( sin( wt ), sin( wt.mul( 1.31 ).add( 2.0 ) ).mul( 0.4 ), cos( wt.mul( 0.83 ) ) ).mul( 0.8 ) );
+
+				}
+
+				// fish flee the pointer
+				{
+
+					const dp = p.sub( uPointer ).toVar();
+					const fall = exp( dp.dot( dp ).mul( - 0.02 ) );
+					force.addAssign( normalize( dp ).mul( fall ).mul( 6.0 ).mul( uPointerAmt ) );
+
+				}
+
+				// pulse waves scatter them
+				{
+
+					const rv = p.sub( uAttractor ).toVar();
+					const d = rv.length().max( 0.001 );
+					force.addAssign( rv.div( d ).mul( sin( d.mul( 1.05 ).sub( uTime.mul( 3.1 ) ) ) ).mul( exp( d.mul( - 0.055 ) ) ).mul( 2.4 ).mul( uPulse ) );
+
+				}
+
+				// containment (fish keep a margin from walls and surface)
+				{
+
+					const rxz = p.xz.length().max( 0.001 ).toVar();
+					const away = vec3( p.x, 0, p.z ).div( rxz ).toVar();
+					If( rxz.greaterThan( R - 2.5 ), () => {
+
+						force.subAssign( away.mul( rxz.sub( R - 2.5 ) ).mul( 3.0 ) );
+
+					} );
+					If( p.y.lessThan( 1.4 ), () => {
+
+						force.addAssign( vec3( 0, float( 1.4 ).sub( p.y ).mul( 4.0 ), 0 ) );
+
+					} );
+					If( p.y.greaterThan( H - 0.8 ), () => {
+
+						force.subAssign( vec3( 0, p.y.sub( H - 0.8 ).mul( 4.0 ), 0 ) );
+
+					} );
+
+				}
+
+				v.addAssign( force.mul( uDelta ) );
+				v.mulAssign( exp( uDelta.mul( - 0.8 ) ) );
+
+				// fish never stop swimming: clamp speed into [1.4, 5.5]
+				const sp = v.length().max( 0.001 ).toVar();
+				If( sp.greaterThan( 5.5 ), () => {
+
+					v.assign( v.div( sp ).mul( 5.5 ) );
+
+				} );
+				If( sp.lessThan( 1.4 ), () => {
+
+					v.assign( v.div( sp ).mul( 1.4 ) );
+
+				} );
+
+				p.addAssign( v.mul( uDelta ).mul( 2.2 ) );
+
+			} )().compute( FISH ).setName( 'School Update' );
+
+			// ------------------------------------------------- particle material
+
+			const material = new THREE.SpriteNodeMaterial( {
+				transparent: true,
+				depthWrite: false,
+				blending: THREE.AdditiveBlending
+			} );
+
+			const seafoam = color( 0x9fe7d8 );
+			const sand = color( 0xead9ae );
+			const shell = color( 0xf3c6bc );
+			const foam = color( 0xf7fbf6 );
+			const biolume = color( 0x8ffde8 );
+
+			const h = hash( instanceIndex.add( 9 ) );
+			const base = mix(
+				mix( seafoam, sand, smoothstep( 0.0, 0.5, h ) ),
+				shell,
+				smoothstep( 0.55, 1.0, h )
+			);
+
+			const speed01 = clamp( velocities.element( instanceIndex ).length().mul( 0.22 ), 0.0, 1.0 );
+			const glowAmt = clamp( excite.element( instanceIndex ), 0.0, 1.0 );
+
+			let lit = mix( base.mul( 0.55 ), foam, speed01.pow( 1.6 ) );
+			lit = mix( lit, biolume.mul( 2.2 ), glowAmt );
+
+			const worldPos = positions.toAttribute().mul( uWorldScale );
+			const camDist = cameraPosition.sub( worldPos ).length();
+
+			const d = uv().sub( 0.5 ).length();
+			const glow = float( 0.075 ).div( d ).sub( 0.15 );
+
+			material.colorNode = vec4( lit.mul( uBoost ).mul( glowAmt.mul( 1.5 ).add( 1.0 ) ), glow );
+			material.positionNode = worldPos;
+			// angular clamp — fill-rate + near-bloom guard when you're inside the cloud
+			material.scaleNode = uSize
+				.mul( hash( instanceIndex.add( 4 ) ).mul( 0.95 ).add( 0.5 ) )
+				.mul( uWorldScale )
+				.min( camDist.mul( 0.14 ) );
+
+			const particles = new THREE.Sprite( material );
+			particles.count = particleCount;
+			particles.frustumCulled = false;
+			scene.add( particles );
+
+			// ----------------------------------------------------- fish material
+
+			// dart geometry pointing +z, tail at -z
+			const fishGeometry = new THREE.ConeGeometry( 0.16, 1.1, 6 );
+			fishGeometry.rotateX( Math.PI / 2 );
+
+			const fishMaterial = new THREE.MeshBasicNodeMaterial();
+
+			const fishVertex = Fn( () => {
+
+				const position = positionLocal.toVar();
+
+				// tail wiggle grows toward the back of the body, paced by swim speed
+				const fv = fishVel.element( instanceIndex ).toVar();
+				const fsp = fv.length().max( 0.001 ).toVar();
+				const tail = negate( positionLocal.z ).add( 0.55 ).max( 0.0 );
+				const wig = sin( uTime.mul( fsp.mul( 1.6 ).add( 4.0 ) ).add( hash( instanceIndex ).mul( TWO_PI ) ).add( positionLocal.z.mul( 2.5 ) ) );
+				position.x = position.x.add( wig.mul( 0.12 ).mul( tail ) );
+
+				// orient +z along velocity (yaw about Y, then pitch about X)
+				const nv = fv.div( fsp ).toVar();
+				const xz = nv.xz.length().max( 0.0001 ).toVar();
+
+				const sinry = nv.x.div( xz ).toVar();
+				const cosry = nv.z.div( xz ).toVar();
+
+				// column-major: maps local +z to the horizontal heading
+				const maty = mat3(
+					cosry, 0, negate( sinry ),
+					0, 1, 0,
+					sinry, 0, cosry
+				);
+
+				const sinrx = negate( nv.y ).toVar();
+				const cosrx = xz;
+
+				const matx = mat3(
+					1, 0, 0,
+					0, cosrx, sinrx,
+					0, negate( sinrx ), cosrx
+				);
+
+				const rotated = maty.mul( matx ).mul( position );
+
+				return fishPos.toAttribute().add( rotated ).mul( uWorldScale );
+
+			} );
+
+			fishMaterial.positionNode = fishVertex();
+
+			const fh = hash( instanceIndex.add( 3 ) );
+			const koi = mix( mix( shell, sand, smoothstep( 0.0, 0.6, fh ) ), foam, smoothstep( 0.82, 0.95, fh ) );
+			fishMaterial.colorNode = varying( vec4( koi.mul( uBoost ).mul( 1.1 ), 1.0 ) );
+
+			const fishMesh = new THREE.InstancedMesh( fishGeometry, fishMaterial, FISH );
+			fishMesh.frustumCulled = false;
+			scene.add( fishMesh );
+
+			// ------------------------------------------------- caustic sand floor
+
+			const floorGeometry = new THREE.CircleGeometry( R + 8, 72 );
+			floorGeometry.rotateX( - Math.PI / 2 );
+
+			const floorMaterial = new THREE.MeshBasicNodeMaterial();
+
+			const fp = positionLocal;
+			const n1 = mx_noise_float( vec3( fp.x.mul( 0.28 ), fp.z.mul( 0.28 ), uTime.mul( 0.22 ) ) );
+			const n2 = mx_noise_float( vec3( fp.x.mul( 0.31 ).add( 31.0 ), fp.z.mul( 0.31 ).add( 17.0 ), uTime.mul( 0.29 ) ) );
+			const caust = float( 1.0 ).sub( abs( n1 ) ).mul( float( 1.0 ).sub( abs( n2 ) ) ).pow( 6.0 );
+			const edgeFade = smoothstep( float( R + 8 ), float( R * 0.55 ), fp.xz.length() );
+
+			const floorDeep = color( 0x0d2225 );
+			const floorSand = color( 0x2a4644 );
+			floorMaterial.colorNode = vec4(
+				mix( floorDeep, floorSand, edgeFade.mul( 0.6 ) ).add( seafoam.mul( caust ).mul( edgeFade ).mul( 0.34 ) ).mul( uBoost ),
+				1.0
+			);
+			floorMaterial.positionNode = positionLocal.mul( uWorldScale );
+
+			const floor = new THREE.Mesh( floorGeometry, floorMaterial );
+			floor.position.y = 0.01;
+			scene.add( floor );
+
+			// -------------------------------------------------------- renderer
+
+			// requiredLimits: reading 3 storage buffers in the vertex stage
+			// (positions + velocities + excite) exceeds some default device limits
+			const rendererParameters = {
+				antialias: true,
+				requiredLimits: { maxStorageBuffersInVertexStage: 3 }
+			};
+
+			function createRenderer( forceWebGL = false ) {
+
+				const parameters = { ...rendererParameters };
+				if ( forceWebGL === true ) {
+
+					parameters.forceWebGL = true;
+					delete parameters.requiredLimits;
+
+				}
+
+				const r = new THREE.WebGPURenderer( parameters );
+				r.setPixelRatio( Math.min( devicePixelRatio, 2 ) );
+				r.setSize( innerWidth, innerHeight );
+				r.toneMapping = THREE.ACESFilmicToneMapping;
+				r.xr.enabled = true;
+				return r;
+
+			}
+
+			function makePipeline( r ) {
+
+				const sceneColor = pass( scene, camera );
+				const bloomPass = bloom( sceneColor.getTextureNode(), 0.75, 0.35, 0.0 );
+				const vig = smoothstep( 0.92, 0.34, screenUV.distance( vec2( 0.5 ) ) );
+
+				const p = new THREE.RenderPipeline( r );
+				p.outputNode = sceneColor.getTextureNode().add( bloomPass ).mul( mix( float( 0.72 ), float( 1.0 ), vig ) );
+				return p;
+
+			}
+
+			async function finishRendererSetup( r ) {
+
+				try {
+
+					await r.init();
+
+				} catch ( err ) {
+
+					// most likely requiredLimits unsatisfiable — retry without them
+					console.warn( 'renderer init failed, retrying without requiredLimits', err );
+					r.dispose();
+					const retry = new THREE.WebGPURenderer( { antialias: true, forceWebGL: true } );
+					retry.setPixelRatio( Math.min( devicePixelRatio, 2 ) );
+					retry.setSize( innerWidth, innerHeight );
+					retry.toneMapping = THREE.ACESFilmicToneMapping;
+					retry.xr.enabled = true;
+					setRenderer( retry, renderer );
+					return;
+
+				}
+
+				r.compute( computeInit );
+				r.compute( fishInit );
+				pipeline = makePipeline( r );
+
+				document.getElementById( 'backend' ).textContent = r.backend.isWebGPUBackend ? 'WebGPU' : 'WebGL2';
+				document.getElementById( 'backend' ).className = r.backend.isWebGPUBackend ? 'gpu' : 'gl';
+
+				bindRendererEvents( r );
+				r.setAnimationLoop( animate );
+				veil.classList.add( 'done' );
+
+			}
+
+			function setRenderer( newRenderer, oldRenderer = null ) {
+
+				if ( oldRenderer === null ) {
+
+					document.body.appendChild( newRenderer.domElement );
+
+				} else {
+
+					oldRenderer.setAnimationLoop( null );
+					document.body.replaceChild( newRenderer.domElement, oldRenderer.domElement );
+					oldRenderer.dispose();
+
+				}
+
+				renderer = newRenderer;
+				pipeline = null;
+				finishRendererSetup( newRenderer );
+
+			}
+
+			setRenderer( createRenderer() );
+
+			// XR sessions fall back to a WebGL renderer where WebXR+WebGPU isn't supported
+			setupWebGLXRFallback( renderer, () => createRenderer( true ), setRenderer );
+
+			try {
+
+				if ( navigator.xr ) {
+
+					document.body.appendChild( XRButton.createButton( renderer, { optionalFeatures: [ 'webgpu' ] } ) );
+
+				}
+
+			} catch ( err ) {
+
+				console.warn( 'XR unavailable', err );
+
+			}
+
+			document.getElementById( 'pcount' ).textContent = particleCount.toLocaleString( 'en-US' );
+			document.getElementById( 'fcount' ).textContent = FISH.toLocaleString( 'en-US' );
+
+			bindUI();
+
+		}
+
+		// -------------------------------------------------------- interaction
+
+		const raycaster = new THREE.Raycaster();
+		const ndc = new THREE.Vector2();
+		const plane = new THREE.Plane();
+		const hit = new THREE.Vector3();
+		const lastHit = new THREE.Vector3();
+		let hasLastHit = false;
+
+		function pointerToPool( event ) {
+
+			ndc.set( ( event.clientX / innerWidth ) * 2 - 1, - ( event.clientY / innerHeight ) * 2 + 1 );
+			raycaster.setFromCamera( ndc, camera );
+
+			plane.setFromNormalAndCoplanarPoint(
+				camera.getWorldDirection( new THREE.Vector3() ).negate(),
+				controls ? controls.target : new THREE.Vector3( 0, H * 0.42, 0 )
+			);
+
+			if ( ! raycaster.ray.intersectPlane( plane, hit ) ) return null;
+
+			// pointer lives in sim space: undo the world scale
+			hit.divideScalar( uWorldScale.value );
+			return hit;
+
+		}
+
+		const setMode = ( m ) => {
+
+			currentMode = m;
+			modeTargets = [ 0, 0, 0, 0 ];
+			modeTargets[ m ] = 1;
+			document.querySelectorAll( '#modes button' ).forEach( ( b, i ) => b.classList.toggle( 'active', i === m ) );
+
+		};
+
+		function bindRendererEvents( r ) {
+
+			const el = r.domElement;
+
+			el.addEventListener( 'pointermove', ( e ) => {
+
+				if ( ! pointerToPool( e ) ) return;
+
+				if ( hasLastHit ) {
+
+					const dt = Math.max( uDelta.value, 0.001 );
+					uPointerVel.value.copy( hit ).sub( lastHit ).divideScalar( dt * 60 ).clampLength( 0, 3 );
+
+				}
+
+				uPointer.value.copy( hit );
+				lastHit.copy( hit );
+				hasLastHit = true;
+				uPointerAmt.value = 1;
+
+			} );
+
+			el.addEventListener( 'pointerdown', ( e ) => {
+
+				if ( pointerToPool( e ) ) {
+
+					uPointer.value.copy( hit );
+					r.compute( computeBurst );
+
+				}
+
+			} );
+
+			el.addEventListener( 'pointerleave', () => { hasLastHit = false; } );
+
+			// controls
+			const savedTarget = controls ? controls.target.clone() : new THREE.Vector3( 0, H * 0.42, 0 );
+			if ( controls ) controls.dispose();
+			controls = new OrbitControls( camera, el );
+			controls.enableDamping = true;
+			controls.minDistance = 10;
+			controls.maxDistance = 140;
+			controls.maxPolarAngle = Math.PI * 0.58;
+			controls.target.copy( savedTarget );
+			controls.autoRotate = ! reducedMotion;
+			controls.autoRotateSpeed = 0.25;
+			controls.update();
+
+			// XR session lifecycle: meters-scale the pool, boost brightness (no bloom in XR)
+			r.xr.addEventListener( 'sessionstart', () => {
+
+				uWorldScale.value = XRSCALE;
+				uBoost.value = XRBOOST * BRIGHT[ brightIdx ];
+				scene.backgroundNode = null; // AR passthrough stays visible; VR reads as dark water
+
+				const session = r.xr.getSession();
+				session.addEventListener( 'select', ( ev ) => {
+
+					const hand = ev.inputSource && ev.inputSource.handedness;
+					if ( hand === 'left' ) {
+
+						brightIdx = ( brightIdx + 1 ) % BRIGHT.length;
+						uBoost.value = XRBOOST * BRIGHT[ brightIdx ];
+
+					} else {
+
+						setMode( ( currentMode + 1 ) % 4 );
+
+					}
+
+				} );
+
+			} );
+
+			r.xr.addEventListener( 'sessionend', () => {
+
+				uWorldScale.value = 1;
+				uBoost.value = 1;
+				scene.backgroundNode = mix( color( 0x04100f ), color( 0x0f2b2c ), screenUV.y.pow( 1.4 ) );
+
+			} );
+
+		}
+
+		function bindUI() {
+
+			document.querySelectorAll( '#modes button' ).forEach( ( b ) => b.addEventListener( 'click', () => setMode( + b.dataset.mode ) ) );
+
+			window.addEventListener( 'keydown', ( e ) => {
+
+				if ( e.code === 'Space' ) { paused = ! paused; e.preventDefault(); }
+				const m = [ 'Digit1', 'Digit2', 'Digit3', 'Digit4' ].indexOf( e.code );
+				if ( m >= 0 ) setMode( m );
+
+			} );
+
+			document.getElementById( 'density' ).addEventListener( 'click', () => {
+
+				const next = DENSITIES[ ( DENSITIES.indexOf( particleCount ) + 1 ) % DENSITIES.length ];
+				const q = new URLSearchParams( location.search );
+				q.set( 'n', next );
+				location.search = q.toString();
+
+			} );
+
+			window.addEventListener( 'resize', () => {
+
+				camera.aspect = innerWidth / innerHeight;
+				camera.updateProjectionMatrix();
+				renderer.setSize( innerWidth, innerHeight );
+
+			} );
+
+		}
+
+		// --------------------------------------------------------------- loop
+
+		const clock = new THREE.Clock();
+		let fpsFrames = 0, fpsTime = 0;
+		const timeScale = reducedMotion ? 0.35 : 1;
+
+		function animate() {
+
+			const dt = Math.min( clock.getDelta(), 1 / 30 ) * timeScale;
+			const presenting = renderer.xr.isPresenting;
+
+			if ( controls && ! presenting ) controls.update();
+
+			if ( ! paused ) {
+
+				uDelta.value = dt;
+				uTime.value += dt;
+
+				const k = Math.min( 1, dt * 2.2 );
+				weights.forEach( ( w, i ) => { w.value += ( modeTargets[ i ] - w.value ) * k; } );
+
+				const t = uTime.value;
+				uAttractor.value.set(
+					Math.sin( t * 0.31 ) * R * 0.42 + Math.sin( t * 0.13 ) * 4,
+					H * 0.5 + Math.sin( t * 0.21 ) * H * 0.26,
+					Math.cos( t * 0.27 ) * R * 0.42 + Math.cos( t * 0.11 ) * 3
+				);
+				uSwirlAxis.value.set( Math.sin( t * 0.2 ) * 0.35, 1, Math.cos( t * 0.17 ) * 0.35 ).normalize();
+
+				uPointerAmt.value *= Math.exp( - dt * 3.0 );
+				uPointerVel.value.multiplyScalar( Math.exp( - dt * 4.0 ) );
+
+				renderer.compute( computeUpdate );
+				renderer.compute( fishUpdate );
+
+			}
+
+			// bloom pipeline on flat screens; direct render in XR (white-out guard)
+			if ( presenting || ! pipeline ) {
+
+				renderer.render( scene, camera );
+
+			} else {
+
+				pipeline.render();
+
+			}
+
+			fpsFrames ++; fpsTime += dt / timeScale;
+			if ( fpsTime >= 0.5 ) {
+
+				document.getElementById( 'fps' ).textContent = Math.round( fpsFrames / fpsTime );
+				fpsFrames = 0; fpsTime = 0;
+
+			}
+
+		}
+
+	</script>
+</body>
+</html>
