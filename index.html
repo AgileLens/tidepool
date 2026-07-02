@@ -66,6 +66,30 @@
 		}
 		#density:hover { color: var(--seafoam); border-color: var(--seafoam); }
 
+		.comfort { margin-top: 14px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+		.comfort label {
+			display: flex; align-items: center; gap: 7px;
+			color: var(--ink-dim); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+		}
+		.comfort input[type="range"] {
+			-webkit-appearance: none; appearance: none; width: 84px; height: 2px;
+			background: rgba(159,231,216,0.25); border-radius: 2px; outline: none; cursor: pointer;
+		}
+		.comfort input[type="range"]::-webkit-slider-thumb {
+			-webkit-appearance: none; appearance: none; width: 11px; height: 11px; border-radius: 50%;
+			background: var(--seafoam); cursor: pointer; transition: transform .15s;
+		}
+		.comfort input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+		.comfort input[type="range"]::-moz-range-thumb {
+			width: 11px; height: 11px; border-radius: 50%; border: none; background: var(--seafoam); cursor: pointer;
+		}
+		#soundToggle {
+			background: none; border: 1px solid rgba(159,231,216,0.25); border-radius: 3px;
+			color: var(--ink-dim); font: inherit; letter-spacing: inherit; text-transform: uppercase;
+			padding: 3px 8px; cursor: pointer; transition: color .2s, border-color .2s;
+		}
+		#soundToggle:hover, #soundToggle.on { color: var(--seafoam); border-color: var(--seafoam); }
+
 		#modes { bottom: 30px; left: 32px; display: flex; gap: 4px; }
 		#modes button {
 			background: none; border: none; cursor: pointer;
@@ -143,6 +167,10 @@
 		<div class="row"><span class="k">fish</span><span class="v" id="fcount">—</span></div>
 		<div class="row"><span class="k">fps</span><span class="v" id="fps">—</span></div>
 		<button id="density" title="Cycle particle density">density</button>
+		<div class="comfort">
+			<label for="calm">calm<input type="range" id="calm" min="0" max="1" step="0.01">vivid</label>
+			<button id="soundToggle" title="Toggle sound effects">sound: on</button>
+		</div>
 	</div>
 
 	<div class="hud" id="modes">
@@ -225,6 +253,26 @@
 		const uSize = uniform( isMobile ? 0.30 : 0.22 );
 		const uWorldScale = uniform( 1 );   // 1 on desktop, XRSCALE while presenting
 		const uBoost = uniform( 1 );        // brightness compensation (no bloom in XR)
+
+		// ---------------------------------------------------------- calm mode
+		// 0 = vivid (original intensity), 1 = fully calm. Scales bloom, the
+		// speed→brightness gain, and bioluminescence gain/decay together —
+		// see GOTCHAS.md "Accessibility" for why. Default is biased calm,
+		// not opt-in-only, and biased further under prefers-reduced-motion.
+		function loadPref( key, fallback ) {
+
+			try {
+
+				const v = localStorage.getItem( key );
+				return v === null ? fallback : parseFloat( v );
+
+			} catch ( e ) { return fallback; }
+
+		}
+
+		const uCalm = uniform( loadPref( 'tidepool-calm', reducedMotion ? 0.75 : 0.55 ) );
+
+		let soundOn = loadPref( 'tidepool-sound', 1 ) > 0.5;
 
 		init().catch( ( e ) => {
 
@@ -404,9 +452,13 @@
 				p.addAssign( v.mul( uDelta ).mul( 2.2 ) );
 
 				// bioluminescence: excite on stir + turbulence, decay to dark
-				e.mulAssign( exp( uDelta.mul( - 1.6 ) ) );
-				e.addAssign( fall.mul( uPointerAmt ).mul( uDelta ).mul( 10.0 ) );
-				e.addAssign( smoothstep( 2.6, 5.6, sp ).mul( uDelta ).mul( 2.2 ) );
+				// calm mode: slower decay (glow lingers instead of blinking) and
+				// lower gain (smaller luminance swings) — both reduce flash rate
+				const exciteDecay = mix( float( 1.6 ), float( 0.6 ), uCalm );
+				const exciteGain = mix( float( 1.0 ), float( 0.4 ), uCalm );
+				e.mulAssign( exp( uDelta.mul( exciteDecay.negate() ) ) );
+				e.addAssign( fall.mul( uPointerAmt ).mul( uDelta ).mul( 10.0 ).mul( exciteGain ) );
+				e.addAssign( smoothstep( 2.6, 5.6, sp ).mul( uDelta ).mul( 2.2 ).mul( exciteGain ) );
 				e.assign( e.min( 1.0 ) );
 
 			} )().compute( particleCount ).setName( 'Tide Update' );
@@ -559,7 +611,8 @@
 				smoothstep( 0.55, 1.0, h )
 			);
 
-			const speed01 = clamp( velocities.element( instanceIndex ).length().mul( 0.22 ), 0.0, 1.0 );
+			const speedGain = mix( float( 0.22 ), float( 0.09 ), uCalm );
+			const speed01 = clamp( velocities.element( instanceIndex ).length().mul( speedGain ), 0.0, 1.0 );
 			const glowAmt = clamp( excite.element( instanceIndex ), 0.0, 1.0 );
 
 			let lit = mix( base.mul( 0.55 ), foam, speed01.pow( 1.6 ) );
@@ -698,11 +751,22 @@
 			function makePipeline( r ) {
 
 				const sceneColor = pass( scene, camera );
-				const bloomPass = bloom( sceneColor.getTextureNode(), 0.75, 0.35, 0.0 );
+				// BloomNode stores strength/radius directly when given a Node
+				// (strength.isNode ? strength : uniform(strength)) — passing mix()
+				// nodes here means the calm slider updates bloom live, every frame,
+				// with no pipeline rebuild.
+				const bloomStrength = mix( float( 0.75 ), float( 0.08 ), uCalm );
+				const bloomRadius = mix( float( 0.35 ), float( 0.15 ), uCalm );
+				const bloomPass = bloom( sceneColor.getTextureNode(), bloomStrength, bloomRadius, 0.0 );
 				const vig = smoothstep( 0.92, 0.34, screenUV.distance( vec2( 0.5 ) ) );
 
+				// overall peak-brightness trim under calm mode — damps near-camera
+				// additive-blend blowout, the other half of the flash mechanism
+				// alongside bloom strength itself
+				const calmTrim = mix( float( 1.0 ), float( 0.8 ), uCalm );
+
 				const p = new THREE.RenderPipeline( r );
-				p.outputNode = sceneColor.getTextureNode().add( bloomPass ).mul( mix( float( 0.72 ), float( 1.0 ), vig ) );
+				p.outputNode = sceneColor.getTextureNode().add( bloomPass ).mul( mix( float( 0.72 ), float( 1.0 ), vig ) ).mul( calmTrim );
 				return p;
 
 			}
@@ -814,8 +878,61 @@
 
 		}
 
+		// ------------------------------------------------------------- sound
+		// Synthesized tones (Web Audio oscillators), not audio files — keeps
+		// the page a single static HTML file with nothing else to host or
+		// license. Context is created lazily on first user gesture per
+		// browser autoplay policy.
+		let audioCtx = null, masterGain = null;
+
+		function ensureAudio() {
+
+			if ( audioCtx ) return audioCtx;
+			try {
+
+				audioCtx = new ( window.AudioContext || window.webkitAudioContext )();
+				masterGain = audioCtx.createGain();
+				masterGain.gain.value = 0.5;
+				masterGain.connect( audioCtx.destination );
+
+			} catch ( e ) { audioCtx = null; }
+			return audioCtx;
+
+		}
+
+		function playTone( freq, dur, { type = 'sine', gain = 0.055, glideTo = null } = {} ) {
+
+			if ( ! soundOn ) return;
+			const ctx = ensureAudio();
+			if ( ! ctx ) return;
+			if ( ctx.state === 'suspended' ) ctx.resume();
+
+			const osc = ctx.createOscillator();
+			const g = ctx.createGain();
+			osc.type = type;
+			osc.frequency.setValueAtTime( freq, ctx.currentTime );
+			if ( glideTo !== null ) osc.frequency.exponentialRampToValueAtTime( glideTo, ctx.currentTime + dur );
+
+			// quick soft attack, exponential decay — avoids clicks, reads as gentle
+			g.gain.setValueAtTime( 0.0001, ctx.currentTime );
+			g.gain.linearRampToValueAtTime( gain, ctx.currentTime + 0.02 );
+			g.gain.exponentialRampToValueAtTime( 0.0001, ctx.currentTime + dur );
+
+			osc.connect( g );
+			g.connect( masterGain );
+			osc.start();
+			osc.stop( ctx.currentTime + dur + 0.05 );
+
+		}
+
+		const MODE_TONES = [ 261.63, 329.63, 392.0, 493.88 ]; // C4 E4 G4 B4
+		const playModeSound = ( m ) => playTone( MODE_TONES[ m ], 0.5, { type: 'sine', gain: 0.05 } );
+		const playBurstSound = () => playTone( 520, 0.28, { type: 'sine', gain: 0.05, glideTo: 220 } );
+		const playToggleSound = ( on ) => playTone( on ? 440 : 300, 0.18, { type: 'triangle', gain: 0.05 } );
+
 		const setMode = ( m ) => {
 
+			if ( m !== currentMode ) playModeSound( m );
 			currentMode = m;
 			modeTargets = [ 0, 0, 0, 0 ];
 			modeTargets[ m ] = 1;
@@ -851,6 +968,7 @@
 
 					uPointer.value.copy( hit );
 					r.compute( computeBurst );
+					playBurstSound();
 
 				}
 
@@ -925,6 +1043,38 @@
 				const q = new URLSearchParams( location.search );
 				q.set( 'n', next );
 				location.search = q.toString();
+
+			} );
+
+			// calm ⟷ vivid — scales bloom, speed→brightness gain, and
+			// bioluminescence gain/decay together (see makePipeline / computeUpdate)
+			const calmSlider = document.getElementById( 'calm' );
+			calmSlider.value = uCalm.value;
+			calmSlider.addEventListener( 'input', () => {
+
+				uCalm.value = parseFloat( calmSlider.value );
+				try { localStorage.setItem( 'tidepool-calm', String( uCalm.value ) ); } catch ( e ) {}
+
+			} );
+
+			const soundBtn = document.getElementById( 'soundToggle' );
+			const updateSoundBtn = () => {
+
+				soundBtn.textContent = 'sound: ' + ( soundOn ? 'on' : 'off' );
+				soundBtn.classList.toggle( 'on', soundOn );
+
+			};
+			updateSoundBtn();
+
+			soundBtn.addEventListener( 'click', () => {
+
+				// force-on briefly so the confirmation tone plays even when muting
+				const turningOn = ! soundOn;
+				soundOn = true;
+				playToggleSound( turningOn );
+				soundOn = turningOn;
+				try { localStorage.setItem( 'tidepool-sound', soundOn ? '1' : '0' ); } catch ( e ) {}
+				updateSoundBtn();
 
 			} );
 
